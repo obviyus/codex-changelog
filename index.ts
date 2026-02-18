@@ -125,7 +125,7 @@ async function generatePost(pair: ReleasePair): Promise<string> {
 	const previousName = (pair.previous.name ?? pair.previous.tag_name).replace(/^rust-v/, "");
 	const notes = pair.current.body?.trim() || "No release notes provided.";
 
-	const prompt = [
+	const basePrompt = [
 		"Write one X post for a software changelog.",
 		"Hard limits: max 280 chars total; plain text; no hashtags.",
 		"Use a simple emoji at the start of every non-empty line.",
@@ -139,8 +139,23 @@ async function generatePost(pair: ReleasePair): Promise<string> {
 		"Return only post text.",
 	].join("\n\n");
 
-	const raw = (await Bun.$`claude -p ${prompt}`.quiet().text()).trim();
-	return finalizePost(raw, pair.current.html_url);
+	let lastError: Error | null = null;
+	for (let attempt = 1; attempt <= 3; attempt += 1) {
+		const prompt =
+			attempt === 1
+				? basePrompt
+				: `${basePrompt}\n\nYour previous answer was too long. Make this version much shorter.`;
+		const raw = (await Bun.$`claude -p ${prompt}`.quiet().text()).trim();
+		try {
+			return finalizePost(raw, pair.current.html_url);
+		} catch (error) {
+			if (!(error instanceof Error)) throw error;
+			lastError = error;
+			if (!error.message.includes("chars (>")) throw error;
+		}
+	}
+
+	throw lastError ?? new Error("claude post generation failed");
 }
 
 function xClient(): Client {
