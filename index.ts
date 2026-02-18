@@ -1,4 +1,5 @@
 import { dirname } from "node:path";
+import { Client, OAuth1 } from "@xdevplatform/xdk";
 
 const OWNER = "openai";
 const REPO = "codex";
@@ -26,11 +27,6 @@ type ReleasePair = {
 	previous: Release;
 };
 
-type GeneratedPost = {
-	tag: string;
-	text: string;
-};
-
 async function githubJson<T>(path: string): Promise<T> {
 	const token = Bun.env.GITHUB_TOKEN;
 	const headers: Record<string, string> = {
@@ -47,6 +43,12 @@ async function githubJson<T>(path: string): Promise<T> {
 	}
 
 	return (await response.json()) as T;
+}
+
+function requiredEnv(name: string): string {
+	const value = Bun.env[name];
+	if (!value) throw new Error(`Missing required env var: ${name}`);
+	return value;
 }
 
 async function readState(path: string): Promise<string | null> {
@@ -113,7 +115,7 @@ function finalizePost(raw: string, releaseUrl: string): string {
 	return text;
 }
 
-async function generatePost(pair: ReleasePair): Promise<GeneratedPost> {
+async function generatePost(pair: ReleasePair): Promise<string> {
 	const compare = await githubJson<CompareResponse>(
 		`/repos/${OWNER}/${REPO}/compare/${pair.previous.tag_name}...${pair.current.tag_name}`,
 	);
@@ -138,10 +140,18 @@ async function generatePost(pair: ReleasePair): Promise<GeneratedPost> {
 	].join("\n\n");
 
 	const raw = (await Bun.$`claude -p ${prompt}`.quiet().text()).trim();
-	return {
-		tag: pair.current.tag_name,
-		text: finalizePost(raw, pair.current.html_url),
-	};
+	return finalizePost(raw, pair.current.html_url);
+}
+
+function xClient(): Client {
+	const oauth1 = new OAuth1({
+		apiKey: requiredEnv("X_API_KEY"),
+		apiSecret: requiredEnv("X_API_SECRET"),
+		accessToken: requiredEnv("X_ACCESS_TOKEN"),
+		accessTokenSecret: requiredEnv("X_ACCESS_TOKEN_SECRET"),
+		callback: "oob",
+	});
+	return new Client({ oauth1 });
 }
 
 async function main(): Promise<void> {
@@ -157,15 +167,17 @@ async function main(): Promise<void> {
 		return;
 	}
 
-	const posts = await Promise.all(pairs.map(generatePost));
-	for (const [index, post] of posts.entries()) {
-		console.log(post.text);
-		if (index < posts.length - 1) console.log("");
-	}
+	const client = xClient();
+	for (const [index, pair] of pairs.entries()) {
+		const postText = await generatePost(pair);
+		const response = await client.posts.create({ text: postText });
+		const id = response.data?.id;
+		if (!id) throw new Error(`X create post missing id for tag ${pair.current.tag_name}`);
 
-	const newest = posts[posts.length - 1]?.tag;
-	if (!newest) throw new Error("Internal: missing newest generated tag");
-	await writeState(STATE_FILE, newest);
+		await writeState(STATE_FILE, pair.current.tag_name);
+		console.log(postText);
+		if (index < pairs.length - 1) console.log("");
+	}
 }
 
 main().catch((error: unknown) => {

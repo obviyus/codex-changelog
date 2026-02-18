@@ -28,16 +28,6 @@ jobs:
       - name: Install Claude CLI
         run: bun add -g @anthropic-ai/claude-code
 
-      - name: Verify Claude key
-        run: |
-          set -euo pipefail
-          if [ -z "${ANTHROPIC_API_KEY:-}" ]; then
-            echo "ANTHROPIC_API_KEY is required" >&2
-            exit 1
-          fi
-        env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-
       - name: Generate post + update state
         run: |
           set -euo pipefail
@@ -46,23 +36,31 @@ jobs:
           cat /tmp/post.txt
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          X_API_KEY: ${{ secrets.X_API_KEY }}
+          X_API_SECRET: ${{ secrets.X_API_SECRET }}
+          X_ACCESS_TOKEN: ${{ secrets.X_ACCESS_TOKEN }}
+          X_ACCESS_TOKEN_SECRET: ${{ secrets.X_ACCESS_TOKEN_SECRET }}
 
-      - name: Commit state only when changed
-        id: state_commit
+      - name: Check state change
+        id: state_check
         run: |
           set -euo pipefail
           if [ -z "$(git status --porcelain -- .state/last_posted_tag.txt)" ]; then
             echo "changed=false" >> "$GITHUB_OUTPUT"
-            exit 0
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Commit state
+        if: steps.state_check.outputs.changed == 'true'
+        run: |
+          set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add .state/last_posted_tag.txt
           tag="$(cat .state/last_posted_tag.txt)"
           git commit -m "chore(state): update last posted tag to ${tag}"
           git push
-          echo "changed=true" >> "$GITHUB_OUTPUT"
 
       - name: Step summary
         run: |
@@ -70,4 +68,4 @@ jobs:
           echo "" >> "$GITHUB_STEP_SUMMARY"
           cat /tmp/post.txt >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "state committed: ${{ steps.state_commit.outputs.changed }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "state changed: ${{ steps.state_check.outputs.changed }}" >> "$GITHUB_STEP_SUMMARY"
