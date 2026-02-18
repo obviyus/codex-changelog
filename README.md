@@ -20,7 +20,7 @@ bun run index.ts
 
 Required secrets:
 
-- `ANTHROPIC_API_KEY`
+- `CLAUDE_CODE_OAUTH_TOKEN`
 - `X_API_KEY`
 - `X_API_SECRET`
 - `X_ACCESS_TOKEN`
