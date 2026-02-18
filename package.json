@@ -1,0 +1,23 @@
+{
+	"name": "codex-changelog",
+	"private": true,
+	"type": "module",
+	"module": "index.ts",
+	"scripts": {
+		"format": "oxfmt --check . --ignore-path .oxfmtignore",
+		"format:write": "oxfmt --write . --ignore-path .oxfmtignore",
+		"lint": "oxlint --type-aware .",
+		"lint:fix": "oxlint --type-aware . --fix",
+		"typecheck": "tsgo --noEmit -p tsconfig.json"
+	},
+	"devDependencies": {
+		"@types/bun": "latest",
+		"@typescript/native-preview": "^7.0.0-dev.20260218.1",
+		"oxfmt": "^0.33.0",
+		"oxlint": "^1.48.0",
+		"oxlint-tsgolint": "^0.14.0"
+	},
+	"peerDependencies": {
+		"typescript": "^5"
+	}
+}
