@@ -1,0 +1,73 @@
+name: Codex Changelog Hourly
+
+on:
+  schedule:
+    - cron: "0 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: codex-changelog-hourly
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Install deps
+        run: bun install --frozen-lockfile
+
+      - name: Install Claude CLI
+        run: bun add -g @anthropic-ai/claude-code
+
+      - name: Verify Claude key
+        run: |
+          set -euo pipefail
+          if [ -z "${ANTHROPIC_API_KEY:-}" ]; then
+            echo "ANTHROPIC_API_KEY is required" >&2
+            exit 1
+          fi
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+
+      - name: Generate post + update state
+        run: |
+          set -euo pipefail
+          bun run index.ts > /tmp/post.txt
+          echo "Generated post:"
+          cat /tmp/post.txt
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+
+      - name: Commit state only when changed
+        id: state_commit
+        run: |
+          set -euo pipefail
+          if [ -z "$(git status --porcelain -- .state/last_posted_tag.txt)" ]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add .state/last_posted_tag.txt
+          tag="$(cat .state/last_posted_tag.txt)"
+          git commit -m "chore(state): update last posted tag to ${tag}"
+          git push
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+
+      - name: Step summary
+        run: |
+          echo "### Post text" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          cat /tmp/post.txt >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "state committed: ${{ steps.state_commit.outputs.changed }}" >> "$GITHUB_STEP_SUMMARY"
