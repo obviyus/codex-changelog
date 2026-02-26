@@ -8,7 +8,8 @@
 		"format:write": "oxfmt --write . --ignore-path .oxfmtignore",
 		"lint": "oxlint --type-aware .",
 		"lint:fix": "oxlint --type-aware . --fix",
-		"typecheck": "tsgo --noEmit -p tsconfig.json"
+		"typecheck": "tsgo --noEmit -p tsconfig.json",
+		"test": "bun test"
 	},
 	"dependencies": {
 		"@xdevplatform/xdk": "^0.4.0"
