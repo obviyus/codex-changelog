@@ -27,6 +27,13 @@ type ReleasePair = {
 	previous: Release;
 };
 
+function normalizeReleaseTag(tag: string): string {
+	const trimmed = tag.trim();
+	if (!trimmed) throw new Error("Release tag is required");
+	if (trimmed.startsWith("rust-v")) return trimmed;
+	return `rust-v${trimmed.replace(/^v/, "")}`;
+}
+
 async function githubJson<T>(path: string): Promise<T> {
 	const token = Bun.env.GITHUB_TOKEN;
 	const headers: Record<string, string> = {
@@ -91,23 +98,37 @@ function releasePairsSinceTag(releases: Release[], lastTag: string | null): Rele
 	return pairs;
 }
 
-function finalizePost(raw: string, releaseUrl: string): string {
+function parseReleaseVersion(release: Release): string {
+	const source = `${release.name ?? ""}\n${release.tag_name}`.trim();
+	const match = source.match(/\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?/);
+	if (!match) throw new Error(`Could not parse release version from ${release.tag_name}`);
+	return match[0];
+}
+
+function finalizePost(raw: string, releaseUrl: string, version: string): string {
 	const linkLine = `Changelog: ${releaseUrl}`;
+	const titleLine = `🚀 Codex ${version} is out!`;
 	const normalized = raw.replace(/\r\n/g, "\n").trim();
 	if (!normalized) throw new Error("claude returned empty post text");
-	if (!normalized.includes("\n")) throw new Error("claude returned single-line post");
 
-	let body = normalized.replace(/(?:\n|^)\s*Changelog:\s*\S+\s*$/i, "").trim();
-	if (!body) throw new Error("claude returned only changelog line");
+	const featureLines = normalized
+		.replace(/(?:\n|^)\s*Changelog:\s*\S+\s*$/i, "")
+		.split("\n")
+		.map((line) => line.trim())
+		.filter(Boolean)
+		.filter((line) => !/^🚀\s*Codex .+ is out!$/i.test(line));
 
-	const lines = body.split("\n").map((line) => line.trimEnd());
-	if (lines.length > 1 && lines[0] && lines[1] !== "") lines.splice(1, 0, "");
-	body = lines
-		.join("\n")
-		.replace(/\n{3,}/g, "\n\n")
-		.trim();
+	if (featureLines.length < 3 || featureLines.length > 5) {
+		throw new Error(`claude returned ${featureLines.length} feature lines (expected 3-5)`);
+	}
 
-	const text = `${body}\n\n${linkLine}`;
+	for (const line of featureLines) {
+		if (!/^\p{Extended_Pictographic}/u.test(line)) {
+			throw new Error(`feature line must start with emoji: ${line}`);
+		}
+	}
+
+	const text = `${titleLine}\n\n${featureLines.join("\n")}\n\n${linkLine}`;
 	if (text.length > MAX_POST_LEN) {
 		throw new Error(`claude returned ${text.length} chars (> ${MAX_POST_LEN})`);
 	}
@@ -122,21 +143,22 @@ async function generatePost(pair: ReleasePair): Promise<string> {
 
 	const changedFiles = compare.changed_files ?? compare.files?.length ?? 0;
 	const releaseName = (pair.current.name ?? pair.current.tag_name).replace(/^rust-v/, "");
+	const releaseVersion = parseReleaseVersion(pair.current);
 	const previousName = (pair.previous.name ?? pair.previous.tag_name).replace(/^rust-v/, "");
 	const notes = pair.current.body?.trim() || "No release notes provided.";
 
 	const basePrompt = [
-		"Write one X post for a software changelog.",
-		"Hard limits: max 280 chars total; plain text; no hashtags.",
-		"Use a simple emoji at the start of every non-empty line.",
-		"Use 3-5 short lines.",
+		"Write feature bullets for one X software changelog post.",
+		"Return only feature bullet lines. Do not include title. Do not include changelog URL line.",
+		"Hard limits: max 180 chars total; plain text; no hashtags.",
+		"Use 3-5 short lines, one feature per line.",
+		"Each line must start with an emoji, then a space, then text.",
 		`Release: Codex ${releaseName}`,
 		`Compared to: ${previousName}`,
 		`Stats: ${compare.total_commits} commits, ${changedFiles} files changed.`,
 		"Release notes:",
 		notes,
-		`End with exact line: "Changelog: ${pair.current.html_url}"`,
-		"Return only post text.",
+		"Return only feature bullet lines.",
 	].join("\n\n");
 
 	let lastError: Error | null = null;
@@ -147,7 +169,7 @@ async function generatePost(pair: ReleasePair): Promise<string> {
 				: `${basePrompt}\n\nYour previous answer was too long. Make this version much shorter.`;
 		const raw = (await Bun.$`claude -p ${prompt}`.quiet().text()).trim();
 		try {
-			return finalizePost(raw, pair.current.html_url);
+			return finalizePost(raw, pair.current.html_url, releaseVersion);
 		} catch (error) {
 			if (!(error instanceof Error)) throw error;
 			lastError = error;
@@ -156,6 +178,22 @@ async function generatePost(pair: ReleasePair): Promise<string> {
 	}
 
 	throw lastError ?? new Error("claude post generation failed");
+}
+
+async function releaseByTag(tag: string): Promise<Release> {
+	const normalizedTag = normalizeReleaseTag(tag);
+	return githubJson<Release>(`/repos/${OWNER}/${REPO}/releases/tags/${normalizedTag}`);
+}
+
+export async function generatePostForTags(
+	previousTag: string,
+	currentTag: string,
+): Promise<string> {
+	const [previous, current] = await Promise.all([
+		releaseByTag(previousTag),
+		releaseByTag(currentTag),
+	]);
+	return generatePost({ previous, current });
 }
 
 function xClient(): Client {
@@ -195,11 +233,13 @@ async function main(): Promise<void> {
 	}
 }
 
-main().catch((error: unknown) => {
-	if (error instanceof Error) {
-		console.error(error.message);
-	} else {
-		console.error(String(error));
-	}
-	process.exit(1);
-});
+if (import.meta.main) {
+	main().catch((error: unknown) => {
+		if (error instanceof Error) {
+			console.error(error.message);
+		} else {
+			console.error(String(error));
+		}
+		process.exit(1);
+	});
+}
