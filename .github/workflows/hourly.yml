@@ -29,12 +29,12 @@ jobs:
         run: bun add -g @anthropic-ai/claude-code
 
       - name: Add Bun global bin to PATH
-        run: echo "${HOME}/.bun/bin" >> "$GITHUB_PATH"
+        run: echo "$(bun pm bin -g)" >> "$GITHUB_PATH"
 
       - name: Generate post + update state
         run: |
           set -euo pipefail
-          export CLAUDE_BINARY="$HOME/.bun/bin/claude"
+          export CLAUDE_BINARY="$(bun pm bin -g)/claude"
           bun run index.ts > /tmp/post.txt
           echo "Generated post:"
           cat /tmp/post.txt
