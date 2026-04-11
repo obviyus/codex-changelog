@@ -187,7 +187,29 @@ async function generatePost(pair: ReleasePair): Promise<string> {
 			attempt === 1
 				? basePrompt
 				: `${basePrompt}\n\nYour previous answer was too long. Make this version much shorter.`;
-		const raw = (await Bun.$`claude -p ${prompt}`.quiet().text()).trim();
+		let raw: string;
+		try {
+			raw = (await Bun.$`claude -p ${prompt}`.quiet().text()).trim();
+		} catch (error) {
+			if (error instanceof Error) {
+				const shellError = error as Error & {
+					exitCode?: number;
+					stderr?: Buffer;
+					stdout?: Buffer;
+				};
+				const details = [
+					shellError.exitCode === undefined ? null : `exit=${shellError.exitCode}`,
+					shellError.stderr?.toString().trim() || null,
+					shellError.stdout?.toString().trim() || null,
+				]
+					.filter(Boolean)
+					.join("\n");
+				throw new Error(details ? `claude -p failed\n${details}` : "claude -p failed", {
+					cause: error,
+				});
+			}
+			throw error;
+		}
 		try {
 			return finalizePost(raw, pair.current.html_url, releaseVersion);
 		} catch (error) {
