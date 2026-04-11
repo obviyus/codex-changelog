@@ -194,11 +194,14 @@ async function generatePost(pair: ReleasePair): Promise<string> {
 				: `${basePrompt}\n\nYour previous answer was too long. Make this version much shorter.`;
 		let raw: string;
 		try {
-			const proc = Bun.spawn([process.execPath, claude, "-p", prompt], {
+			const proc = Bun.spawn(
+				[process.execPath, claude, "-p", "--permission-mode", "bypassPermissions", prompt],
+				{
 					env: Bun.env,
 					stdout: "pipe",
 					stderr: "pipe",
-				});
+				},
+			);
 			const [stdout, stderr, exitCode] = await Promise.all([
 				proc.stdout.text(),
 				proc.stderr.text(),
