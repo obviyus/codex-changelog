@@ -52,6 +52,26 @@ async function githubJson<T>(path: string): Promise<T> {
 	return (await response.json()) as T;
 }
 
+async function listReleasesUntil(lastTag: string | null): Promise<Release[]> {
+	const releases: Release[] = [];
+
+	for (let page = 1; ; page += 1) {
+		const pageReleases = await githubJson<Release[]>(
+			`/repos/${OWNER}/${REPO}/releases?per_page=100&page=${page}`,
+		);
+		const publicReleases = pageReleases.filter((release) => !release.draft && !release.prerelease);
+		releases.push(...publicReleases);
+
+		if (lastTag) {
+			if (releases.some((release) => release.tag_name === lastTag)) return releases;
+		} else if (releases.length >= 2) {
+			return releases;
+		}
+
+		if (pageReleases.length < 100) return releases;
+	}
+}
+
 function requiredEnv(name: string): string {
 	const value = Bun.env[name];
 	if (!value) throw new Error(`Missing required env var: ${name}`);
@@ -208,11 +228,10 @@ function xClient(): Client {
 }
 
 async function main(): Promise<void> {
-	const allReleases = await githubJson<Release[]>(`/repos/${OWNER}/${REPO}/releases?per_page=30`);
-	const releases = allReleases.filter((release) => !release.draft && !release.prerelease);
+	const lastTag = await readState(STATE_FILE);
+	const releases = await listReleasesUntil(lastTag);
 	if (releases.length < 2) throw new Error("Need at least 2 public releases");
 
-	const lastTag = await readState(STATE_FILE);
 	const pairs = releasePairsSinceTag(releases, lastTag);
 
 	if (pairs.length === 0) {
