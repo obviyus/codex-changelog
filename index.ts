@@ -79,7 +79,7 @@ function requiredEnv(name: string): string {
 }
 
 function claudeBinary(): string {
-	const binary = Bun.which("claude");
+	const binary = Bun.env.CLAUDE_BINARY || Bun.which("claude");
 	if (!binary) throw new Error("claude CLI not found in PATH");
 	return binary;
 }
