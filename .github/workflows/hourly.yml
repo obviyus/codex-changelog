@@ -28,6 +28,9 @@ jobs:
       - name: Install Claude CLI
         run: bun add -g @anthropic-ai/claude-code
 
+      - name: Add Bun global bin to PATH
+        run: echo "${HOME}/.bun/bin" >> "$GITHUB_PATH"
+
       - name: Generate post + update state
         run: |
           set -euo pipefail
