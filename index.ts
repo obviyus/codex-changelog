@@ -190,10 +190,10 @@ async function generatePost(pair: ReleasePair): Promise<string> {
 		let raw: string;
 		try {
 			const proc = Bun.spawn(
-				[process.execPath, "x", "-p", "@anthropic-ai/claude-code", "claude", "-p", prompt],
+				[process.execPath, "x", "claude", "-p", prompt],
 				{
-				env: Bun.env,
-				stdout: "pipe",
+					env: Bun.env,
+					stdout: "pipe",
 				stderr: "pipe",
 				},
 			);
