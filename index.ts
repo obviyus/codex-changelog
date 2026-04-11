@@ -78,6 +78,12 @@ function requiredEnv(name: string): string {
 	return value;
 }
 
+function claudeBinary(): string {
+	const binary = Bun.which("claude");
+	if (!binary) throw new Error("claude CLI not found in PATH");
+	return binary;
+}
+
 async function readState(path: string): Promise<string | null> {
 	const file = Bun.file(path);
 	if (!(await file.exists())) return null;
@@ -157,6 +163,7 @@ function finalizePost(raw: string, releaseUrl: string, version: string): string 
 }
 
 async function generatePost(pair: ReleasePair): Promise<string> {
+	const claude = claudeBinary();
 	const compare = await githubJson<CompareResponse>(
 		`/repos/${OWNER}/${REPO}/compare/${pair.previous.tag_name}...${pair.current.tag_name}`,
 	);
@@ -189,7 +196,7 @@ async function generatePost(pair: ReleasePair): Promise<string> {
 				: `${basePrompt}\n\nYour previous answer was too long. Make this version much shorter.`;
 		let raw: string;
 		try {
-			raw = (await Bun.$`claude -p ${prompt}`.quiet().text()).trim();
+			raw = (await Bun.$`${claude} -p ${prompt}`.quiet().text()).trim();
 		} catch (error) {
 			if (error instanceof Error) {
 				const shellError = error as Error & {
