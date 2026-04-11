@@ -196,25 +196,25 @@ async function generatePost(pair: ReleasePair): Promise<string> {
 				: `${basePrompt}\n\nYour previous answer was too long. Make this version much shorter.`;
 		let raw: string;
 		try {
-			raw = (await Bun.$`${claude} -p ${prompt}`.quiet().text()).trim();
-		} catch (error) {
-			if (error instanceof Error) {
-				const shellError = error as Error & {
-					exitCode?: number;
-					stderr?: Buffer;
-					stdout?: Buffer;
-				};
-				const details = [
-					shellError.exitCode === undefined ? null : `exit=${shellError.exitCode}`,
-					shellError.stderr?.toString().trim() || null,
-					shellError.stdout?.toString().trim() || null,
-				]
+			const proc = Bun.spawn([claude, "-p", prompt], {
+				env: Bun.env,
+				stdout: "pipe",
+				stderr: "pipe",
+			});
+			const [stdout, stderr, exitCode] = await Promise.all([
+				proc.stdout.text(),
+				proc.stderr.text(),
+				proc.exited,
+			]);
+			if (exitCode !== 0) {
+				const details = [`exit=${exitCode}`, stderr.trim() || null, stdout.trim() || null]
 					.filter(Boolean)
 					.join("\n");
-				throw new Error(details ? `claude -p failed\n${details}` : "claude -p failed", {
-					cause: error,
-				});
+				throw new Error(details ? `claude -p failed\n${details}` : "claude -p failed");
 			}
+			raw = stdout.trim();
+		} catch (error) {
+			if (error instanceof Error) throw error;
 			throw error;
 		}
 		try {
