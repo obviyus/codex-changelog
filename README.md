@@ -1,8 +1,15 @@
 # codex-changelog
 
-Generate and publish X posts for `openai/codex` releases.
+Generate and publish X posts for Codex changelog updates.
 
-If multiple public releases appear between checks, script outputs all unseen releases from oldest to newest.
+Source: `https://developers.openai.com/codex/changelog`
+
+Tracked topics:
+
+- `codex-app`
+- `codex-cli`
+
+If multiple unseen changelog entries appear between checks, script outputs all unseen entries from oldest to newest.
 
 ## Run
 
@@ -15,7 +22,7 @@ bun run index.ts
 - workflow: `.github/workflows/hourly.yml`
 - schedule: hourly (`0 * * * *`) + manual trigger
 - `index.ts` generates, publishes to X, and updates state in one run
-- commits `.state/last_posted_tag.txt` when changed
+- commits `.state/last_posted_key.txt` when changed
 - CI uses Claude CLI for post generation
 
 Required secrets:
@@ -39,8 +46,11 @@ Required secrets:
 
 ## State file
 
-Default: `.state/last_posted_tag.txt`
+Default: `.state/last_posted_key.txt`
 
-- script skips output when state tag matches latest tag
-- script backfills all unseen releases between `state tag -> latest`
-- script writes tag only after successful post publish
+- script stores the last posted changelog key
+- CLI entries use `rust-v<version>` keys
+- app entries use the changelog entry id
+- script skips output when state key matches latest entry
+- script backfills all unseen entries between `state key -> latest`
+- script writes state only after successful post publish

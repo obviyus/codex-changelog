@@ -1,75 +1,179 @@
 import { dirname, join } from "node:path";
 import { Client, OAuth1 } from "@xdevplatform/xdk";
 
-const OWNER = "openai";
-const REPO = "codex";
-const STATE_FILE = ".state/last_posted_tag.txt";
+const CHANGELOG_URL = "https://developers.openai.com/codex/changelog";
+const STATE_FILE = ".state/last_posted_key.txt";
 const MAX_POST_LEN = 280;
+const TARGET_TOPICS = new Set(["codex-app", "codex-cli"]);
 
-type Release = {
-	tag_name: string;
-	html_url: string;
-	name: string | null;
-	body: string | null;
-	draft: boolean;
-	prerelease: boolean;
-	published_at: string | null;
+type ChangelogTopic = "codex-app" | "codex-cli";
+
+type ChangelogEntry = {
+	key: string;
+	id: string;
+	topic: ChangelogTopic;
+	date: string;
+	title: string;
+	version: string | null;
+	url: string;
+	body: string;
 };
 
-type CompareResponse = {
-	total_commits: number;
-	changed_files?: number;
-	files?: { filename: string }[];
-};
-
-type ReleasePair = {
-	current: Release;
-	previous: Release;
-};
-
-function normalizeReleaseTag(tag: string): string {
-	const trimmed = tag.trim();
-	if (!trimmed) throw new Error("Release tag is required");
-	if (trimmed.startsWith("rust-v")) return trimmed;
-	return `rust-v${trimmed.replace(/^v/, "")}`;
+function topicLabel(topic: ChangelogTopic): string {
+	return topic === "codex-app" ? "Codex app" : "Codex CLI";
 }
 
-async function githubJson<T>(path: string): Promise<T> {
-	const token = Bun.env.GITHUB_TOKEN;
-	const headers: Record<string, string> = {
-		Accept: "application/vnd.github+json",
-		"User-Agent": "codex-changelog-bot",
-		"X-GitHub-Api-Version": "2022-11-28",
-	};
-	if (token) headers.Authorization = `Bearer ${token}`;
+function normalizeCliVersion(version: string): string {
+	return version.replace(/^rust-v/, "").replace(/^v/, "");
+}
 
-	const response = await fetch(`https://api.github.com${path}`, { headers });
+function entryKey(topic: ChangelogTopic, id: string, version: string | null): string {
+	if (topic === "codex-cli" && version) return `rust-v${normalizeCliVersion(version)}`;
+	return id;
+}
+
+function postTitle(entry: ChangelogEntry): string {
+	if (entry.version) return `🚀 ${topicLabel(entry.topic)} ${entry.version} is out!`;
+	if (entry.topic === "codex-app") return "🚀 Codex app update";
+	return "🚀 Codex CLI update";
+}
+
+function featureCharBudget(entry: ChangelogEntry): number {
+	return MAX_POST_LEN - postTitle(entry).length - `Changelog: ${entry.url}`.length - 6;
+}
+
+function decodeHtmlEntities(text: string): string {
+	return text
+		.replaceAll("&nbsp;", " ")
+		.replaceAll("&amp;", "&")
+		.replaceAll("&lt;", "<")
+		.replaceAll("&gt;", ">")
+		.replaceAll("&quot;", '"')
+		.replaceAll("&#39;", "'")
+		.replace(/&#(\d+);/g, (_, codePoint: string) => String.fromCodePoint(Number(codePoint)))
+		.replace(/&#x([0-9a-f]+);/gi, (_, codePoint: string) =>
+			String.fromCodePoint(Number.parseInt(codePoint, 16)),
+		);
+}
+
+function htmlToText(html: string): string {
+	const withoutNoise = html
+		.replace(/<script[\s\S]*?<\/script>/gi, "")
+		.replace(/<style[\s\S]*?<\/style>/gi, "")
+		.replace(/<svg[\s\S]*?<\/svg>/gi, "")
+		.replace(/<button[\s\S]*?<\/button>/gi, "")
+		.replace(/<img\b[^>]*>/gi, "");
+
+	const withBreaks = withoutNoise
+		.replace(/<\/(p|h1|h2|h3|h4|h5|h6|div|section|article|ul|ol|details)>/gi, "\n")
+		.replace(/<br\s*\/?>/gi, "\n")
+		.replace(/<li\b[^>]*>/gi, "\n- ")
+		.replace(/<\/li>/gi, "\n");
+
+	return decodeHtmlEntities(withBreaks.replace(/<[^>]+>/g, ""))
+		.split("\n")
+		.map((line) => line.replace(/\s+/g, " ").trim())
+		.filter(Boolean)
+		.join("\n");
+}
+
+function parseVersion(title: string): string | null {
+	const match = title.match(/\b(\d+\.\d+(?:\.\d+)?)\s*$/);
+	return match?.[1] ?? null;
+}
+
+function parseTitle(html: string): { title: string; version: string | null } {
+	const text = htmlToText(html);
+	const version = parseVersion(text);
+	if (!version) return { title: text, version: null };
+	return { title: text.slice(0, -version.length).trim(), version };
+}
+
+function promptNotes(body: string): string {
+	return body.split("\n").slice(0, 12).join("\n");
+}
+
+async function changelogHtml(): Promise<string> {
+	const response = await fetch(CHANGELOG_URL);
 	if (!response.ok) {
 		const text = await response.text();
-		throw new Error(`GitHub API ${response.status} ${path}\n${text}`);
+		throw new Error(`Changelog ${response.status} ${CHANGELOG_URL}\n${text}`);
 	}
-
-	return (await response.json()) as T;
+	return response.text();
 }
 
-async function listReleasesUntil(lastTag: string | null): Promise<Release[]> {
-	const releases: Release[] = [];
+async function listEntries(): Promise<ChangelogEntry[]> {
+	const html = await changelogHtml();
+	const response = new HTMLRewriter()
+		.on("li[data-codex-topics]", {
+			element(element) {
+				const topic = element.getAttribute("data-codex-topics");
+				if (!topic || !TARGET_TOPICS.has(topic)) return;
+				const id = element.getAttribute("id");
+				if (!id) throw new Error("Changelog entry missing id");
+				element.before(`\nENTRY_START\t${id}\t${topic}\n`, { html: false });
+				element.after("\nENTRY_END\n", { html: false });
+			},
+		})
+		.on("li[data-codex-topics] > div time", {
+			element(element) {
+				element.before("\nDATE_START\n", { html: false });
+				element.after("\nDATE_END\n", { html: false });
+			},
+		})
+		.on("li[data-codex-topics] > div h3", {
+			element(element) {
+				element.before("\nTITLE_START\n", { html: false });
+				element.after("\nTITLE_END\n", { html: false });
+			},
+		})
+		.on("li[data-codex-topics] > article", {
+			element(element) {
+				element.before("\nBODY_START\n", { html: false });
+				element.after("\nBODY_END\n", { html: false });
+			},
+		})
+		.transform(new Response(html));
+	const markedHtml = await response.text();
 
-	for (let page = 1; ; page += 1) {
-		const pageReleases = await githubJson<Release[]>(
-			`/repos/${OWNER}/${REPO}/releases?per_page=100&page=${page}`,
-		);
-		const publicReleases = pageReleases.filter((release) => !release.draft && !release.prerelease);
-		releases.push(...publicReleases);
-
-		if (lastTag) {
-			if (releases.some((release) => release.tag_name === lastTag)) return releases;
-		} else if (releases.length >= 2) {
-			return releases;
+	const blocks = [...markedHtml.matchAll(/ENTRY_START\t([^\t\n]+)\t([^\n]+)\n([\s\S]*?)\nENTRY_END/g)];
+	const entries = blocks.map((match) => {
+		const id = match[1];
+		const topic = match[2];
+		const block = match[3];
+		if (!id || !topic || !block) throw new Error("Malformed changelog entry block");
+		if (topic !== "codex-app" && topic !== "codex-cli") {
+			throw new Error(`Unexpected topic: ${topic}`);
 		}
+		const date = block.match(/DATE_START\n([\s\S]*?)\nDATE_END/)?.[1];
+		const titleHtml = block.match(/TITLE_START\n([\s\S]*?)\nTITLE_END/)?.[1];
+		const bodyHtml = block.match(/BODY_START\n([\s\S]*?)\nBODY_END/)?.[1];
+		if (!date || !titleHtml || !bodyHtml) throw new Error(`Incomplete changelog entry: ${id}`);
+		const parsedTitle = parseTitle(titleHtml);
+		return {
+			id,
+			topic,
+			date: htmlToText(date),
+			title: parsedTitle.title,
+			version: parsedTitle.version,
+			url: `${CHANGELOG_URL}#${id}`,
+			body: htmlToText(bodyHtml),
+			key: entryKey(topic, id, parsedTitle.version),
+		} satisfies ChangelogEntry;
+	});
 
-		if (pageReleases.length < 100) return releases;
-	}
+	if (entries.length === 0) throw new Error("No Codex app or CLI changelog entries found");
+	return entries;
+}
+
+function entriesSinceKey(entries: ChangelogEntry[], lastKey: string | null): ChangelogEntry[] {
+	if (!lastKey) return entries.slice(0, 1).reverse();
+	if (lastKey === entries[0]?.key) return [];
+
+	const anchorIndex = entries.findIndex((entry) => entry.key === lastKey);
+	if (anchorIndex < 0) throw new Error(`State key not found in changelog: ${lastKey}`);
+
+	return entries.slice(0, anchorIndex).reverse();
 }
 
 function requiredEnv(name: string): string {
@@ -89,49 +193,15 @@ async function readState(path: string): Promise<string | null> {
 	return text.length > 0 ? text : null;
 }
 
-async function writeState(path: string, tag: string): Promise<void> {
+async function writeState(path: string, value: string): Promise<void> {
 	const dir = dirname(path);
 	if (dir && dir !== ".") await Bun.$`mkdir -p ${dir}`.quiet();
-	await Bun.write(path, `${tag}\n`);
+	await Bun.write(path, `${value}\n`);
 }
 
-function pairAt(releases: Release[], currentIndex: number): ReleasePair {
-	const current = releases[currentIndex];
-	const previous = releases[currentIndex + 1];
-	if (!current || !previous) {
-		throw new Error(`No previous release found for tag ${current?.tag_name ?? "unknown"}`);
-	}
-	return { current, previous };
-}
-
-function releasePairsSinceTag(releases: Release[], lastTag: string | null): ReleasePair[] {
-	if (releases.length < 2) {
-		throw new Error("Need at least 2 public releases");
-	}
-
-	if (!lastTag) return [pairAt(releases, 0)];
-	if (lastTag === releases[0]?.tag_name) return [];
-
-	const anchorIndex = releases.findIndex((release) => release.tag_name === lastTag);
-	if (anchorIndex < 0) throw new Error(`State tag not found in releases: ${lastTag}`);
-
-	const pairs: ReleasePair[] = [];
-	for (let currentIndex = anchorIndex - 1; currentIndex >= 0; currentIndex -= 1) {
-		pairs.push(pairAt(releases, currentIndex));
-	}
-	return pairs;
-}
-
-function parseReleaseVersion(release: Release): string {
-	const source = `${release.name ?? ""}\n${release.tag_name}`.trim();
-	const match = source.match(/\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?/);
-	if (!match) throw new Error(`Could not parse release version from ${release.tag_name}`);
-	return match[0];
-}
-
-function finalizePost(raw: string, releaseUrl: string, version: string): string {
-	const linkLine = `Changelog: ${releaseUrl}`;
-	const titleLine = `🚀 Codex ${version} is out!`;
+function finalizePost(raw: string, entry: ChangelogEntry): string {
+	const titleLine = postTitle(entry);
+	const linkLine = `Changelog: ${entry.url}`;
 	const normalized = raw.replace(/\r\n/g, "\n").trim();
 	if (!normalized) throw new Error("claude returned empty post text");
 
@@ -140,7 +210,7 @@ function finalizePost(raw: string, releaseUrl: string, version: string): string 
 		.split("\n")
 		.map((line) => line.trim())
 		.filter(Boolean)
-		.filter((line) => !/^🚀\s*Codex .+ is out!$/i.test(line));
+		.filter((line) => line !== titleLine);
 
 	if (featureLines.length < 3 || featureLines.length > 5) {
 		throw new Error(`claude returned ${featureLines.length} feature lines (expected 3-5)`);
@@ -160,66 +230,59 @@ function finalizePost(raw: string, releaseUrl: string, version: string): string 
 	return text;
 }
 
-async function generatePost(pair: ReleasePair): Promise<string> {
+async function generatePost(entry: ChangelogEntry): Promise<string> {
 	const claude = claudeBinary();
-	const compare = await githubJson<CompareResponse>(
-		`/repos/${OWNER}/${REPO}/compare/${pair.previous.tag_name}...${pair.current.tag_name}`,
-	);
-
-	const changedFiles = compare.changed_files ?? compare.files?.length ?? 0;
-	const releaseName = (pair.current.name ?? pair.current.tag_name).replace(/^rust-v/, "");
-	const releaseVersion = parseReleaseVersion(pair.current);
-	const previousName = (pair.previous.name ?? pair.previous.tag_name).replace(/^rust-v/, "");
-	const notes = pair.current.body?.trim() || "No release notes provided.";
+	const notes = promptNotes(entry.body.trim() || "No changelog details provided.");
+	const charBudget = featureCharBudget(entry);
 
 	const basePrompt = [
 		"Write feature bullets for one X software changelog post.",
 		"Return only feature bullet lines. Do not include title. Do not include changelog URL line.",
-		"Hard limits: max 180 chars total; plain text; no hashtags.",
-		"Use 3-5 short lines, one feature per line.",
+		`Hard limit: max ${charBudget} chars total across all bullet lines combined; plain text; no hashtags.`,
+		"Use exactly 3 short lines, one feature per line.",
 		"Each line must start with an emoji, then a space, then text.",
-		`Release: Codex ${releaseName}`,
-		`Compared to: ${previousName}`,
-		`Stats: ${compare.total_commits} commits, ${changedFiles} files changed.`,
-		"Release notes:",
+		"Prefer terse noun phrases over sentences.",
+		`Product: ${topicLabel(entry.topic)}`,
+		`Published: ${entry.date}`,
+		`Headline: ${entry.title}`,
+		entry.version ? `Version: ${entry.version}` : null,
+		"Changelog details:",
 		notes,
 		"Return only feature bullet lines.",
-	].join("\n\n");
+	]
+		.filter(Boolean)
+		.join("\n\n");
 
 	let lastError: Error | null = null;
 	for (let attempt = 1; attempt <= 3; attempt += 1) {
 		const prompt =
 			attempt === 1
 				? basePrompt
-				: `${basePrompt}\n\nYour previous answer was too long. Make this version much shorter.`;
+				: `${basePrompt}\n\nYour previous answer was too long. Use much shorter wording. Keep all 3 lines together under ${charBudget} chars total.`;
 		let raw: string;
-		try {
-			const proc = Bun.spawn(
-				[process.execPath, claude, "-p", "--permission-mode", "bypassPermissions", prompt],
-				{
-					env: Bun.env,
-					stdout: "pipe",
-					stderr: "pipe",
-				},
-			);
-			const [stdout, stderr, exitCode] = await Promise.all([
-				proc.stdout.text(),
-				proc.stderr.text(),
-				proc.exited,
-			]);
-			if (exitCode !== 0) {
-				const details = [`exit=${exitCode}`, stderr.trim() || null, stdout.trim() || null]
-					.filter(Boolean)
-					.join("\n");
-				throw new Error(details ? `claude -p failed\n${details}` : "claude -p failed");
-			}
-			raw = stdout.trim();
-		} catch (error) {
-			if (error instanceof Error) throw error;
-			throw error;
+		const proc = Bun.spawn(
+			[process.execPath, claude, "-p", "--permission-mode", "bypassPermissions", prompt],
+			{
+				env: Bun.env,
+				stdout: "pipe",
+				stderr: "pipe",
+			},
+		);
+		const [stdout, stderr, exitCode] = await Promise.all([
+			proc.stdout.text(),
+			proc.stderr.text(),
+			proc.exited,
+		]);
+		if (exitCode !== 0) {
+			const details = [`exit=${exitCode}`, stderr.trim() || null, stdout.trim() || null]
+				.filter(Boolean)
+				.join("\n");
+			throw new Error(details ? `claude -p failed\n${details}` : "claude -p failed");
 		}
+		raw = stdout.trim();
+
 		try {
-			return finalizePost(raw, pair.current.html_url, releaseVersion);
+			return finalizePost(raw, entry);
 		} catch (error) {
 			if (!(error instanceof Error)) throw error;
 			lastError = error;
@@ -230,20 +293,11 @@ async function generatePost(pair: ReleasePair): Promise<string> {
 	throw lastError ?? new Error("claude post generation failed");
 }
 
-async function releaseByTag(tag: string): Promise<Release> {
-	const normalizedTag = normalizeReleaseTag(tag);
-	return githubJson<Release>(`/repos/${OWNER}/${REPO}/releases/tags/${normalizedTag}`);
-}
-
-export async function generatePostForTags(
-	previousTag: string,
-	currentTag: string,
-): Promise<string> {
-	const [previous, current] = await Promise.all([
-		releaseByTag(previousTag),
-		releaseByTag(currentTag),
-	]);
-	return generatePost({ previous, current });
+export async function generateLatestPost(): Promise<string> {
+	const entries = await listEntries();
+	const latestEntry = entries[0];
+	if (!latestEntry) throw new Error("No changelog entries found");
+	return generatePost(latestEntry);
 }
 
 function xClient(): Client {
@@ -258,27 +312,25 @@ function xClient(): Client {
 }
 
 async function main(): Promise<void> {
-	const lastTag = await readState(STATE_FILE);
-	const releases = await listReleasesUntil(lastTag);
-	if (releases.length < 2) throw new Error("Need at least 2 public releases");
+	const lastKey = await readState(STATE_FILE);
+	const entries = await listEntries();
+	const pendingEntries = entriesSinceKey(entries, lastKey);
 
-	const pairs = releasePairsSinceTag(releases, lastTag);
-
-	if (pairs.length === 0) {
-		console.log(`No new release. latest=${releases[0]?.tag_name}`);
+	if (pendingEntries.length === 0) {
+		console.log(`No new changelog entry. latest=${entries[0]?.key}`);
 		return;
 	}
 
 	const client = xClient();
-	for (const [index, pair] of pairs.entries()) {
-		const postText = await generatePost(pair);
+	for (const [index, entry] of pendingEntries.entries()) {
+		const postText = await generatePost(entry);
 		const response = await client.posts.create({ text: postText });
 		const id = response.data?.id;
-		if (!id) throw new Error(`X create post missing id for tag ${pair.current.tag_name}`);
+		if (!id) throw new Error(`X create post missing id for entry ${entry.key}`);
 
-		await writeState(STATE_FILE, pair.current.tag_name);
+		await writeState(STATE_FILE, entry.key);
 		console.log(postText);
-		if (index < pairs.length - 1) console.log("");
+		if (index < pendingEntries.length - 1) console.log("");
 	}
 }
 
