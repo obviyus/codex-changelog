@@ -5,7 +5,8 @@ const CHANGELOG_URL = "https://developers.openai.com/codex/changelog";
 const GITHUB_API_URL = "https://api.github.com";
 const OWNER = "openai";
 const REPO = "codex";
-const STATE_FILE = ".state/last_posted_key.txt";
+const APP_STATE_FILE = ".state/last_posted_app_key.txt";
+const CLI_STATE_FILE = ".state/last_posted_cli_key.txt";
 const MAX_POST_LEN = 280;
 const APP_TOPIC = "codex-app";
 
@@ -44,6 +45,10 @@ function normalizeCliVersion(version: string): string {
 function entryKey(topic: ChangelogTopic, id: string, version: string | null): string {
 	if (topic === "codex-cli" && version) return `rust-v${normalizeCliVersion(version)}`;
 	return id;
+}
+
+function stateFileForTopic(topic: ChangelogTopic): string {
+	return topic === "codex-app" ? APP_STATE_FILE : CLI_STATE_FILE;
 }
 
 function postTitle(entry: ChangelogEntry): string {
@@ -391,12 +396,21 @@ function xClient(): Client {
 }
 
 async function main(): Promise<void> {
-	const lastKey = await readState(STATE_FILE);
-	const entries = await listEntries();
-	const pendingEntries = entriesSinceKey(entries, lastKey);
+	const [appLastKey, cliLastKey, appEntries, cliEntries] = await Promise.all([
+		readState(APP_STATE_FILE),
+		readState(CLI_STATE_FILE),
+		listAppEntries(),
+		listCliEntries(),
+	]);
+	const pendingEntries = [
+		...entriesSinceKey(appEntries, appLastKey),
+		...entriesSinceKey(cliEntries, cliLastKey),
+	].sort((left, right) => left.publishedAt.localeCompare(right.publishedAt));
 
 	if (pendingEntries.length === 0) {
-		console.log(`No new changelog entry. latest=${entries[0]?.key}`);
+		console.log(
+			`No new changelog entry. latestApp=${appEntries[0]?.key} latestCli=${cliEntries[0]?.key}`,
+		);
 		return;
 	}
 
@@ -407,7 +421,7 @@ async function main(): Promise<void> {
 		const id = response.data?.id;
 		if (!id) throw new Error(`X create post missing id for entry ${entry.key}`);
 
-		await writeState(STATE_FILE, entry.key);
+		await writeState(stateFileForTopic(entry.topic), entry.key);
 		console.log(postText);
 		if (index < pendingEntries.length - 1) console.log("");
 	}

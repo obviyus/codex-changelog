@@ -25,7 +25,7 @@ bun run index.ts
 - workflow: `.github/workflows/hourly.yml`
 - schedule: hourly (`0 * * * *`) + manual trigger
 - `index.ts` generates, publishes to X, and updates state in one run
-- commits `.state/last_posted_key.txt` when changed
+- commits `.state/last_posted_app_key.txt` and `.state/last_posted_cli_key.txt` when changed
 - CI uses Claude CLI for post generation
 
 Required secrets:
@@ -47,13 +47,12 @@ Required secrets:
 - claude-only mode (fails loud on invalid/empty output)
 - stdout: final posted text only
 
-## State file
+## State files
 
-Default: `.state/last_posted_key.txt`
+- app: `.state/last_posted_app_key.txt`
+- cli: `.state/last_posted_cli_key.txt`
 
-- script stores the last posted changelog key
+- app entries use changelog ids such as `codex-2026-04-16-app`
 - CLI entries use `rust-v<version>` keys sourced from GitHub releases
-- app entries use the changelog entry id
-- script skips output when state key matches latest entry
-- script backfills all unseen entries between `state key -> latest`
-- script writes state only after successful post publish
+- each source advances independently, so same-date app and CLI updates do not block each other
+- script writes only the source-specific key after a successful post publish

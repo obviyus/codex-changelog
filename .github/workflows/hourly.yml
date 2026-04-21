@@ -42,7 +42,7 @@ jobs:
         id: state_check
         run: |
           set -euo pipefail
-          if [ -z "$(git status --porcelain -- .state/last_posted_key.txt)" ]; then
+          if [ -z "$(git status --porcelain -- .state/last_posted_app_key.txt .state/last_posted_cli_key.txt)" ]; then
             echo "changed=false" >> "$GITHUB_OUTPUT"
           else
             echo "changed=true" >> "$GITHUB_OUTPUT"
@@ -54,9 +54,8 @@ jobs:
           set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add .state/last_posted_key.txt
-          key="$(cat .state/last_posted_key.txt)"
-          git commit -m "chore(state): update last posted key to ${key}"
+          git add .state/last_posted_app_key.txt .state/last_posted_cli_key.txt
+          git commit -m "chore(state): update last posted keys"
           git push
 
       - name: Step summary
