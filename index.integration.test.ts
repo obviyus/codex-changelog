@@ -11,7 +11,11 @@ test(
 		const text = await generateLatestPost();
 
 		expect(text.startsWith("🚀 ")).toBeTrue();
-		expect(text).toContain("Changelog: https://developers.openai.com/codex/changelog#");
+		expect(
+			/Changelog: https:\/\/(?:developers\.openai\.com\/codex\/changelog#|github\.com\/openai\/codex\/releases\/tag\/)/.test(
+				text,
+			),
+		).toBeTrue();
 		expect(text.length).toBeLessThanOrEqual(280);
 
 		const lines = text.split("\n").filter(Boolean);

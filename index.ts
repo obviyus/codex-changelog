@@ -2,9 +2,12 @@ import { dirname, join } from "node:path";
 import { Client, OAuth1 } from "@xdevplatform/xdk";
 
 const CHANGELOG_URL = "https://developers.openai.com/codex/changelog";
+const GITHUB_API_URL = "https://api.github.com";
+const OWNER = "openai";
+const REPO = "codex";
 const STATE_FILE = ".state/last_posted_key.txt";
 const MAX_POST_LEN = 280;
-const TARGET_TOPICS = new Set(["codex-app", "codex-cli"]);
+const APP_TOPIC = "codex-app";
 
 type ChangelogTopic = "codex-app" | "codex-cli";
 
@@ -13,10 +16,21 @@ type ChangelogEntry = {
 	id: string;
 	topic: ChangelogTopic;
 	date: string;
+	publishedAt: string;
 	title: string;
 	version: string | null;
 	url: string;
 	body: string;
+};
+
+type Release = {
+	tag_name: string;
+	html_url: string;
+	name: string | null;
+	body: string | null;
+	draft: boolean;
+	prerelease: boolean;
+	published_at: string | null;
 };
 
 function topicLabel(topic: ChangelogTopic): string {
@@ -89,6 +103,18 @@ function parseTitle(html: string): { title: string; version: string | null } {
 	return { title: text.slice(0, -version.length).trim(), version };
 }
 
+function parseReleaseVersion(release: Release): string {
+	const source = `${release.name ?? ""}\n${release.tag_name}`.trim();
+	const match = source.match(/\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?/);
+	if (!match) throw new Error(`Could not parse release version from ${release.tag_name}`);
+	return match[0];
+}
+
+function releaseTitle(release: Release): string {
+	const version = parseReleaseVersion(release);
+	return `Codex CLI ${version}`;
+}
+
 function promptNotes(body: string): string {
 	return body.split("\n").slice(0, 12).join("\n");
 }
@@ -102,13 +128,60 @@ async function changelogHtml(): Promise<string> {
 	return response.text();
 }
 
-async function listEntries(): Promise<ChangelogEntry[]> {
+async function githubJson<T>(path: string): Promise<T> {
+	const token = Bun.env.GITHUB_TOKEN;
+	const headers: Record<string, string> = {
+		Accept: "application/vnd.github+json",
+		"User-Agent": "codex-changelog-bot",
+		"X-GitHub-Api-Version": "2022-11-28",
+	};
+	if (token) headers.Authorization = `Bearer ${token}`;
+
+	const response = await fetch(`${GITHUB_API_URL}${path}`, { headers });
+	if (!response.ok) {
+		const text = await response.text();
+		throw new Error(`GitHub API ${response.status} ${path}\n${text}`);
+	}
+
+	return (await response.json()) as T;
+}
+
+async function listCliEntries(): Promise<ChangelogEntry[]> {
+	const releases: Release[] = [];
+	for (let page = 1; ; page += 1) {
+		const pageReleases = await githubJson<Release[]>(
+			`/repos/${OWNER}/${REPO}/releases?per_page=100&page=${page}`,
+		);
+		releases.push(...pageReleases.filter((release) => !release.draft && !release.prerelease));
+		if (pageReleases.length < 100) break;
+	}
+
+	if (releases.length === 0) throw new Error("No public GitHub releases found for Codex CLI");
+	return releases.map((release) => {
+		const publishedAt = release.published_at;
+		if (!publishedAt) throw new Error(`Release missing published_at: ${release.tag_name}`);
+		const version = parseReleaseVersion(release);
+		return {
+			key: `rust-v${normalizeCliVersion(version)}`,
+			id: release.tag_name,
+			topic: "codex-cli",
+			date: publishedAt.slice(0, 10),
+			publishedAt,
+			title: releaseTitle(release),
+			version,
+			url: release.html_url,
+			body: release.body?.trim() || "No release notes provided.",
+		} satisfies ChangelogEntry;
+	});
+}
+
+async function listAppEntries(): Promise<ChangelogEntry[]> {
 	const html = await changelogHtml();
 	const response = new HTMLRewriter()
 		.on("li[data-codex-topics]", {
 			element(element) {
 				const topic = element.getAttribute("data-codex-topics");
-				if (!topic || !TARGET_TOPICS.has(topic)) return;
+				if (topic !== APP_TOPIC) return;
 				const id = element.getAttribute("id");
 				if (!id) throw new Error("Changelog entry missing id");
 				element.before(`\nENTRY_START\t${id}\t${topic}\n`, { html: false });
@@ -142,9 +215,7 @@ async function listEntries(): Promise<ChangelogEntry[]> {
 		const topic = match[2];
 		const block = match[3];
 		if (!id || !topic || !block) throw new Error("Malformed changelog entry block");
-		if (topic !== "codex-app" && topic !== "codex-cli") {
-			throw new Error(`Unexpected topic: ${topic}`);
-		}
+		if (topic !== APP_TOPIC) throw new Error(`Unexpected topic: ${topic}`);
 		const date = block.match(/DATE_START\n([\s\S]*?)\nDATE_END/)?.[1];
 		const titleHtml = block.match(/TITLE_START\n([\s\S]*?)\nTITLE_END/)?.[1];
 		const bodyHtml = block.match(/BODY_START\n([\s\S]*?)\nBODY_END/)?.[1];
@@ -152,18 +223,26 @@ async function listEntries(): Promise<ChangelogEntry[]> {
 		const parsedTitle = parseTitle(titleHtml);
 		return {
 			id,
-			topic,
+			topic: APP_TOPIC,
 			date: htmlToText(date),
+			publishedAt: `${htmlToText(date)}T00:00:00Z`,
 			title: parsedTitle.title,
 			version: parsedTitle.version,
 			url: `${CHANGELOG_URL}#${id}`,
 			body: htmlToText(bodyHtml),
-			key: entryKey(topic, id, parsedTitle.version),
+			key: entryKey(APP_TOPIC, id, parsedTitle.version),
 		} satisfies ChangelogEntry;
 	});
 
-	if (entries.length === 0) throw new Error("No Codex app or CLI changelog entries found");
+	if (entries.length === 0) throw new Error("No Codex app changelog entries found");
 	return entries;
+}
+
+async function listEntries(): Promise<ChangelogEntry[]> {
+	const [appEntries, cliEntries] = await Promise.all([listAppEntries(), listCliEntries()]);
+	return [...appEntries, ...cliEntries].sort((left, right) =>
+		right.publishedAt.localeCompare(left.publishedAt),
+	);
 }
 
 function entriesSinceKey(entries: ChangelogEntry[], lastKey: string | null): ChangelogEntry[] {

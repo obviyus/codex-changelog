@@ -2,7 +2,10 @@
 
 Generate and publish X posts for Codex changelog updates.
 
-Source: `https://developers.openai.com/codex/changelog`
+Sources:
+
+- Codex app: `https://developers.openai.com/codex/changelog`
+- Codex CLI: GitHub public releases for `openai/codex`
 
 Tracked topics:
 
@@ -49,7 +52,7 @@ Required secrets:
 Default: `.state/last_posted_key.txt`
 
 - script stores the last posted changelog key
-- CLI entries use `rust-v<version>` keys
+- CLI entries use `rust-v<version>` keys sourced from GitHub releases
 - app entries use the changelog entry id
 - script skips output when state key matches latest entry
 - script backfills all unseen entries between `state key -> latest`
