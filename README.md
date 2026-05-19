@@ -52,7 +52,8 @@ Required secrets:
 - app: `.state/last_posted_app_key.txt`
 - cli: `.state/last_posted_cli_key.txt`
 
-- app entries use changelog ids such as `codex-2026-04-16-app`
-- CLI entries use `rust-v<version>` keys sourced from GitHub releases
+- state stores `{ "key": "...", "publishedAt": "..." }`
+- app keys use changelog ids such as `codex-2026-04-16-app`
+- CLI keys use `rust-v<version>` values sourced from GitHub releases
 - each source advances independently, so same-date app and CLI updates do not block each other
-- script writes only the source-specific key after a successful post publish
+- script writes only the source-specific state after a successful post publish

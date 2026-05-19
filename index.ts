@@ -8,11 +8,12 @@ const REPO = "codex";
 const APP_STATE_FILE = ".state/last_posted_app_key.txt";
 const CLI_STATE_FILE = ".state/last_posted_cli_key.txt";
 const MAX_POST_LEN = 280;
+const POST_BUDGET_MARGIN = 20;
 const APP_TOPIC = "codex-app";
 
 type ChangelogTopic = "codex-app" | "codex-cli";
 
-type ChangelogEntry = {
+export type ChangelogEntry = {
 	key: string;
 	id: string;
 	topic: ChangelogTopic;
@@ -32,6 +33,11 @@ type Release = {
 	draft: boolean;
 	prerelease: boolean;
 	published_at: string | null;
+};
+
+export type PostedState = {
+	key: string;
+	publishedAt: string;
 };
 
 function topicLabel(topic: ChangelogTopic): string {
@@ -58,7 +64,13 @@ function postTitle(entry: ChangelogEntry): string {
 }
 
 function featureCharBudget(entry: ChangelogEntry): number {
-	return MAX_POST_LEN - postTitle(entry).length - `Changelog: ${entry.url}`.length - 6;
+	return (
+		MAX_POST_LEN -
+		postTitle(entry).length -
+		`Changelog: ${entry.url}`.length -
+		6 -
+		POST_BUDGET_MARGIN
+	);
 }
 
 function decodeHtmlEntities(text: string): string {
@@ -214,7 +226,9 @@ async function listAppEntries(): Promise<ChangelogEntry[]> {
 		.transform(new Response(html));
 	const markedHtml = await response.text();
 
-	const blocks = [...markedHtml.matchAll(/ENTRY_START\t([^\t\n]+)\t([^\n]+)\n([\s\S]*?)\nENTRY_END/g)];
+	const blocks = [
+		...markedHtml.matchAll(/ENTRY_START\t([^\t\n]+)\t([^\n]+)\n([\s\S]*?)\nENTRY_END/g),
+	];
 	const entries = blocks.map((match) => {
 		const id = match[1];
 		const topic = match[2];
@@ -246,18 +260,34 @@ async function listAppEntries(): Promise<ChangelogEntry[]> {
 async function listEntries(): Promise<ChangelogEntry[]> {
 	const [appEntries, cliEntries] = await Promise.all([listAppEntries(), listCliEntries()]);
 	return [...appEntries, ...cliEntries].sort((left, right) =>
-		right.publishedAt.localeCompare(left.publishedAt),
+		compareState(entryState(right), entryState(left)),
 	);
 }
 
-function entriesSinceKey(entries: ChangelogEntry[], lastKey: string | null): ChangelogEntry[] {
-	if (!lastKey) return entries.slice(0, 1).reverse();
-	if (lastKey === entries[0]?.key) return [];
+function compareState(left: PostedState, right: PostedState): number {
+	const publishedAt = left.publishedAt.localeCompare(right.publishedAt);
+	if (publishedAt !== 0) return publishedAt;
+	return left.key.localeCompare(right.key);
+}
 
-	const anchorIndex = entries.findIndex((entry) => entry.key === lastKey);
-	if (anchorIndex < 0) throw new Error(`State key not found in changelog: ${lastKey}`);
+function entryState(entry: ChangelogEntry): PostedState {
+	return { key: entry.key, publishedAt: entry.publishedAt };
+}
 
-	return entries.slice(0, anchorIndex).reverse();
+export function entriesSinceState(
+	entries: ChangelogEntry[],
+	lastState: PostedState | null,
+): ChangelogEntry[] {
+	if (!lastState) {
+		const latest = entries.toSorted((left, right) =>
+			compareState(entryState(right), entryState(left)),
+		)[0];
+		return latest ? [latest] : [];
+	}
+
+	return entries
+		.filter((entry) => compareState(entryState(entry), lastState) > 0)
+		.sort((left, right) => compareState(entryState(left), entryState(right)));
 }
 
 function requiredEnv(name: string): string {
@@ -277,16 +307,36 @@ async function readState(path: string): Promise<string | null> {
 	return text.length > 0 ? text : null;
 }
 
-async function writeState(path: string, value: string): Promise<void> {
-	const dir = dirname(path);
-	if (dir && dir !== ".") await Bun.$`mkdir -p ${dir}`.quiet();
-	await Bun.write(path, `${value}\n`);
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null;
 }
 
-function finalizePost(raw: string, entry: ChangelogEntry): string {
+function parseState(path: string, text: string | null): PostedState | null {
+	if (!text) return null;
+	const value: unknown = JSON.parse(text);
+	if (!isRecord(value)) throw new Error(`Invalid state file: ${path}`);
+	const { key, publishedAt } = value;
+	if (typeof key !== "string" || typeof publishedAt !== "string") {
+		throw new Error(`Invalid state file: ${path}`);
+	}
+	return { key, publishedAt };
+}
+
+async function writeState(path: string, value: PostedState): Promise<void> {
+	const dir = dirname(path);
+	if (dir && dir !== ".") await Bun.$`mkdir -p ${dir}`.quiet();
+	await Bun.write(path, `${JSON.stringify(value)}\n`);
+}
+
+export function finalizePost(raw: string, entry: ChangelogEntry): string {
 	const titleLine = postTitle(entry);
 	const linkLine = `Changelog: ${entry.url}`;
-	const normalized = raw.replace(/\r\n/g, "\n").trim();
+	const normalized = raw
+		.replace(/\r\n/g, "\n")
+		.trim()
+		.replace(/^```[^\n]*\n/, "")
+		.replace(/\n```$/, "")
+		.trim();
 	if (!normalized) throw new Error("claude returned empty post text");
 
 	const featureLines = normalized
@@ -395,19 +445,28 @@ function xClient(): Client {
 	return new Client({ oauth1 });
 }
 
-async function main(): Promise<void> {
-	const [appLastKey, cliLastKey, appEntries, cliEntries] = await Promise.all([
+export async function listPendingEntries(): Promise<ChangelogEntry[]> {
+	const [appStateText, cliStateText, appEntries, cliEntries] = await Promise.all([
 		readState(APP_STATE_FILE),
 		readState(CLI_STATE_FILE),
 		listAppEntries(),
 		listCliEntries(),
 	]);
+	const appState = parseState(APP_STATE_FILE, appStateText);
+	const cliState = parseState(CLI_STATE_FILE, cliStateText);
 	const pendingEntries = [
-		...entriesSinceKey(appEntries, appLastKey),
-		...entriesSinceKey(cliEntries, cliLastKey),
-	].sort((left, right) => left.publishedAt.localeCompare(right.publishedAt));
+		...entriesSinceState(appEntries, appState),
+		...entriesSinceState(cliEntries, cliState),
+	].sort((left, right) => compareState(entryState(left), entryState(right)));
+
+	return pendingEntries;
+}
+
+async function main(): Promise<void> {
+	const pendingEntries = await listPendingEntries();
 
 	if (pendingEntries.length === 0) {
+		const [appEntries, cliEntries] = await Promise.all([listAppEntries(), listCliEntries()]);
 		console.log(
 			`No new changelog entry. latestApp=${appEntries[0]?.key} latestCli=${cliEntries[0]?.key}`,
 		);
@@ -421,7 +480,7 @@ async function main(): Promise<void> {
 		const id = response.data?.id;
 		if (!id) throw new Error(`X create post missing id for entry ${entry.key}`);
 
-		await writeState(stateFileForTopic(entry.topic), entry.key);
+		await writeState(stateFileForTopic(entry.topic), entryState(entry));
 		console.log(postText);
 		if (index < pendingEntries.length - 1) console.log("");
 	}
