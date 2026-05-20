@@ -1,1 +1,1 @@
-{"key":"rust-v0.131.0","publishedAt":"2026-05-18T17:39:34Z"}
+{"key":"rust-v0.132.0","publishedAt":"2026-05-20T01:52:52Z"}
