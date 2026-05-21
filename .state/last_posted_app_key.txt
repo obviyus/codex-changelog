@@ -1,1 +1,1 @@
-{"key":"codex-2026-05-13-app","publishedAt":"2026-05-14T00:00:00Z"}
+{"key":"codex-2026-05-21","publishedAt":"2026-05-21T00:00:00Z"}
