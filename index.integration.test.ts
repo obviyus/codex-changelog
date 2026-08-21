@@ -1,5 +1,11 @@
 import { expect, test } from "bun:test";
-import { entriesSinceState, finalizePost, generateLatestPost, type ChangelogEntry } from "./index";
+import {
+	entriesSinceState,
+	finalizePost,
+	generateLatestPost,
+	listCliEntries,
+	type ChangelogEntry,
+} from "./index";
 
 const baseEntry = {
 	topic: "codex-cli",
@@ -57,6 +63,56 @@ test("state cursor returns newer releases oldest first", () => {
 			publishedAt: "2026-05-08T23:09:55Z",
 		}).map((entry) => entry.key),
 	).toEqual(["rust-v0.131.0", "rust-v0.132.0"]);
+});
+
+test("CLI release pagination stops on the page containing the saved state", async () => {
+	const publishedAt = "2026-08-18T22:26:03Z";
+	const page = Array.from({ length: 100 }, (_, index) => {
+		const version = `0.${200 - index}.0`;
+		return {
+			tag_name: `rust-v${version}`,
+			html_url: `https://github.com/openai/codex/releases/tag/rust-v${version}`,
+			name: version,
+			body: "Release notes.",
+			draft: false,
+			prerelease: false,
+			published_at: index === 99 ? publishedAt : "2026-08-19T00:00:00Z",
+		};
+	});
+	const requestedPages: number[] = [];
+
+	const entries = await listCliEntries(
+		{ key: "rust-v0.101.0", publishedAt },
+		async (pageNumber) => {
+			requestedPages.push(pageNumber);
+			if (pageNumber !== 1) throw new Error(`unexpected page ${pageNumber}`);
+			return page;
+		},
+	);
+
+	expect(requestedPages).toEqual([1]);
+	expect(entries).toHaveLength(100);
+});
+
+test("CLI release pagination reads only the newest page without saved state", async () => {
+	const requestedPages: number[] = [];
+	const releases = await listCliEntries(null, async (pageNumber) => {
+		requestedPages.push(pageNumber);
+		return [
+			{
+				tag_name: "rust-v0.200.0",
+				html_url: "https://github.com/openai/codex/releases/tag/rust-v0.200.0",
+				name: "0.200.0",
+				body: "Release notes.",
+				draft: false,
+				prerelease: false,
+				published_at: "2026-08-19T00:00:00Z",
+			},
+		];
+	});
+
+	expect(requestedPages).toEqual([1]);
+	expect(releases.map((release) => release.key)).toEqual(["rust-v0.200.0"]);
 });
 
 test("post finalizer accepts outer code fences", () => {

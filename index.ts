@@ -163,14 +163,23 @@ async function githubJson<T>(path: string): Promise<T> {
 	return (await response.json()) as T;
 }
 
-async function listCliEntries(): Promise<ChangelogEntry[]> {
+export async function listCliEntries(
+	lastState: PostedState | null = null,
+	fetchPage: (page: number) => Promise<Release[]> = (page) =>
+		githubJson<Release[]>(`/repos/${OWNER}/${REPO}/releases?per_page=100&page=${page}`),
+): Promise<ChangelogEntry[]> {
 	const releases: Release[] = [];
 	for (let page = 1; ; page += 1) {
-		const pageReleases = await githubJson<Release[]>(
-			`/repos/${OWNER}/${REPO}/releases?per_page=100&page=${page}`,
-		);
-		releases.push(...pageReleases.filter((release) => !release.draft && !release.prerelease));
-		if (pageReleases.length < 100) break;
+		const pageReleases = await fetchPage(page);
+		const publicReleases = pageReleases.filter((release) => !release.draft && !release.prerelease);
+		releases.push(...publicReleases);
+		const reachedState = lastState
+			? publicReleases.some(
+					(release) =>
+						release.published_at !== null && release.published_at <= lastState.publishedAt,
+				)
+			: false;
+		if (!lastState || reachedState || pageReleases.length < 100) break;
 	}
 
 	if (releases.length === 0) throw new Error("No public GitHub releases found for Codex CLI");
@@ -446,14 +455,13 @@ function xClient(): Client {
 }
 
 export async function listPendingEntries(): Promise<ChangelogEntry[]> {
-	const [appStateText, cliStateText, appEntries, cliEntries] = await Promise.all([
+	const [appStateText, cliStateText] = await Promise.all([
 		readState(APP_STATE_FILE),
 		readState(CLI_STATE_FILE),
-		listAppEntries(),
-		listCliEntries(),
 	]);
 	const appState = parseState(APP_STATE_FILE, appStateText);
 	const cliState = parseState(CLI_STATE_FILE, cliStateText);
+	const [appEntries, cliEntries] = await Promise.all([listAppEntries(), listCliEntries(cliState)]);
 	const pendingEntries = [
 		...entriesSinceState(appEntries, appState),
 		...entriesSinceState(cliEntries, cliState),
