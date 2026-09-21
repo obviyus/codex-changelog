@@ -1,8 +1,9 @@
-import { dirname, join } from "node:path";
+import { dirname } from "node:path";
 import { Client, OAuth1 } from "@xdevplatform/xdk";
 
 const CHANGELOG_URL = "https://developers.openai.com/codex/changelog";
 const GITHUB_API_URL = "https://api.github.com";
+const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
 const OWNER = "openai";
 const REPO = "codex";
 const APP_STATE_FILE = ".state/last_posted_app_key.txt";
@@ -305,10 +306,6 @@ function requiredEnv(name: string): string {
 	return value;
 }
 
-function claudeBinary(): string {
-	return join(import.meta.dir, "node_modules", "@anthropic-ai", "claude-code", "cli.js");
-}
-
 async function readState(path: string): Promise<string | null> {
 	const file = Bun.file(path);
 	if (!(await file.exists())) return null;
@@ -346,7 +343,7 @@ export function finalizePost(raw: string, entry: ChangelogEntry): string {
 		.replace(/^```[^\n]*\n/, "")
 		.replace(/\n```$/, "")
 		.trim();
-	if (!normalized) throw new Error("claude returned empty post text");
+	if (!normalized) throw new Error("OpenRouter returned empty post text");
 
 	const featureLines = normalized
 		.replace(/(?:\n|^)\s*Changelog:\s*\S+\s*$/i, "")
@@ -356,7 +353,7 @@ export function finalizePost(raw: string, entry: ChangelogEntry): string {
 		.filter((line) => line !== titleLine);
 
 	if (featureLines.length < 3 || featureLines.length > 5) {
-		throw new Error(`claude returned ${featureLines.length} feature lines (expected 3-5)`);
+		throw new Error(`OpenRouter returned ${featureLines.length} feature lines (expected 3-5)`);
 	}
 
 	for (const line of featureLines) {
@@ -367,14 +364,15 @@ export function finalizePost(raw: string, entry: ChangelogEntry): string {
 
 	const text = `${titleLine}\n\n${featureLines.join("\n")}\n\n${linkLine}`;
 	if (text.length > MAX_POST_LEN) {
-		throw new Error(`claude returned ${text.length} chars (> ${MAX_POST_LEN})`);
+		throw new Error(`OpenRouter returned ${text.length} chars (> ${MAX_POST_LEN})`);
 	}
 
 	return text;
 }
 
 async function generatePost(entry: ChangelogEntry): Promise<string> {
-	const claude = claudeBinary();
+	const apiKey = requiredEnv("OPENROUTER_API_KEY");
+	const model = Bun.env.OPENROUTER_MODEL || "anthropic/claude-opus-5";
 	const notes = promptNotes(entry.body.trim() || "No changelog details provided.");
 	const charBudget = featureCharBudget(entry);
 
@@ -402,30 +400,40 @@ async function generatePost(entry: ChangelogEntry): Promise<string> {
 			attempt === 1
 				? basePrompt
 				: `${basePrompt}\n\nYour previous answer was too long. Use much shorter wording. Keep all 3 lines together under ${charBudget} chars total.`;
-		let raw: string;
-		const proc = Bun.spawn(
-			[process.execPath, claude, "-p", "--permission-mode", "bypassPermissions", prompt],
-			{
-				env: Bun.env,
-				stdout: "pipe",
-				stderr: "pipe",
+		const response = await fetch(OPENROUTER_URL, {
+			method: "POST",
+			headers: {
+				Authorization: `Bearer ${apiKey}`,
+				"Content-Type": "application/json",
 			},
-		);
-		const [stdout, stderr, exitCode] = await Promise.all([
-			proc.stdout.text(),
-			proc.stderr.text(),
-			proc.exited,
-		]);
-		if (exitCode !== 0) {
-			const details = [`exit=${exitCode}`, stderr.trim() || null, stdout.trim() || null]
-				.filter(Boolean)
-				.join("\n");
-			throw new Error(details ? `claude -p failed\n${details}` : "claude -p failed");
+			body: JSON.stringify({
+				model,
+				messages: [{ role: "user", content: prompt }],
+				max_tokens: 512,
+				reasoning: { enabled: false },
+			}),
+			signal: AbortSignal.timeout(120_000),
+		});
+		if (!response.ok) {
+			throw new Error(`OpenRouter request failed (HTTP ${response.status})`);
 		}
-		raw = stdout.trim();
+		const result: unknown = await response.json();
+		if (!isRecord(result)) throw new Error("Invalid OpenRouter response");
+		if (isRecord(result.error)) {
+			const code = typeof result.error.code === "number" ? result.error.code : "unknown";
+			throw new Error(`OpenRouter generation failed (code ${code})`);
+		}
+		const choice: unknown = Array.isArray(result.choices) ? result.choices[0] : undefined;
+		if (
+			!isRecord(choice) ||
+			!isRecord(choice.message) ||
+			typeof choice.message.content !== "string"
+		) {
+			throw new Error("OpenRouter response missing post text");
+		}
 
 		try {
-			return finalizePost(raw, entry);
+			return finalizePost(choice.message.content, entry);
 		} catch (error) {
 			if (!(error instanceof Error)) throw error;
 			lastError = error;
@@ -433,7 +441,7 @@ async function generatePost(entry: ChangelogEntry): Promise<string> {
 		}
 	}
 
-	throw lastError ?? new Error("claude post generation failed");
+	throw lastError ?? new Error("OpenRouter post generation failed");
 }
 
 export async function generateLatestPost(): Promise<string> {

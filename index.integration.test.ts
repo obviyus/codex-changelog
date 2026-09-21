@@ -131,13 +131,9 @@ test("post finalizer accepts outer code fences", () => {
 	).toContain("🚀 Codex CLI 0.131.0 is out!");
 });
 
-test(
-	"integration: generate changelog post with live Codex changelog + Claude flow (no X post)",
+test.skipIf(!Bun.env.OPENROUTER_API_KEY)(
+	"integration: generate changelog post with live Codex changelog + OpenRouter (no X post)",
 	async () => {
-		if (!Bun.which("claude")) {
-			throw new Error("claude CLI not found in PATH");
-		}
-
 		const text = await generateLatestPost();
 
 		expect(text.startsWith("🚀 ")).toBeTrue();
