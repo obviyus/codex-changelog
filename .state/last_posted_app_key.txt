@@ -1,1 +1,1 @@
-{"key":"codex-2026-09-25-app","publishedAt":"2026-09-25T00:00:00Z"}
+{"key":"codex-2026-10-09-composer-predictions","publishedAt":"2026-10-09T00:00:00Z"}
