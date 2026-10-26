@@ -26,15 +26,31 @@ export type ChangelogEntry = {
 	body: string;
 };
 
-type Release = {
-	tag_name: string;
-	html_url: string;
+// Metadata only. The REST release list embeds every release body (alphas included), which
+// makes GitHub time out building the page; bodies are fetched per posted release instead.
+export type Release = {
+	tagName: string;
+	url: string;
 	name: string | null;
-	body: string | null;
-	draft: boolean;
-	prerelease: boolean;
-	published_at: string | null;
+	isDraft: boolean;
+	isPrerelease: boolean;
+	publishedAt: string | null;
 };
+
+export type ReleasePage = {
+	releases: Release[];
+	endCursor: string | null;
+	hasNextPage: boolean;
+};
+
+const RELEASES_QUERY = `query($owner: String!, $repo: String!, $after: String) {
+	repository(owner: $owner, name: $repo) {
+		releases(first: 50, after: $after, orderBy: { field: CREATED_AT, direction: DESC }) {
+			nodes { tagName url name isDraft isPrerelease publishedAt }
+			pageInfo { endCursor hasNextPage }
+		}
+	}
+}`;
 
 export type PostedState = {
 	key: string;
@@ -122,9 +138,9 @@ function parseTitle(html: string): { title: string; version: string | null } {
 }
 
 function parseReleaseVersion(release: Release): string {
-	const source = `${release.name ?? ""}\n${release.tag_name}`.trim();
+	const source = `${release.name ?? ""}\n${release.tagName}`.trim();
 	const match = source.match(/\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?/);
-	if (!match) throw new Error(`Could not parse release version from ${release.tag_name}`);
+	if (!match) throw new Error(`Could not parse release version from ${release.tagName}`);
 	return match[0];
 }
 
@@ -146,7 +162,7 @@ async function changelogHtml(): Promise<string> {
 	return response.text();
 }
 
-async function githubJson<T>(path: string): Promise<T> {
+function githubHeaders(): Record<string, string> {
 	const token = Bun.env.GITHUB_TOKEN;
 	const headers: Record<string, string> = {
 		Accept: "application/vnd.github+json",
@@ -154,8 +170,11 @@ async function githubJson<T>(path: string): Promise<T> {
 		"X-GitHub-Api-Version": "2022-11-28",
 	};
 	if (token) headers.Authorization = `Bearer ${token}`;
+	return headers;
+}
 
-	const response = await fetch(`${GITHUB_API_URL}${path}`, { headers });
+async function githubJson<T>(path: string): Promise<T> {
+	const response = await fetch(`${GITHUB_API_URL}${path}`, { headers: githubHeaders() });
 	if (!response.ok) {
 		const text = await response.text();
 		throw new Error(`GitHub API ${response.status} ${path}\n${text}`);
@@ -164,42 +183,80 @@ async function githubJson<T>(path: string): Promise<T> {
 	return (await response.json()) as T;
 }
 
+async function fetchReleasePage(after: string | null): Promise<ReleasePage> {
+	const response = await fetch(`${GITHUB_API_URL}/graphql`, {
+		method: "POST",
+		headers: githubHeaders(),
+		body: JSON.stringify({ query: RELEASES_QUERY, variables: { owner: OWNER, repo: REPO, after } }),
+	});
+	const text = await response.text();
+	if (!response.ok) throw new Error(`GitHub GraphQL ${response.status}\n${text}`);
+	const result = JSON.parse(text) as {
+		data?: {
+			repository?: {
+				releases?: {
+					nodes: Release[];
+					pageInfo: { endCursor: string | null; hasNextPage: boolean };
+				};
+			} | null;
+		};
+		errors?: unknown[];
+	};
+	const releases = result.data?.repository?.releases;
+	if (result.errors?.length || !releases) throw new Error(`GitHub GraphQL error\n${text}`);
+	return {
+		releases: releases.nodes,
+		endCursor: releases.pageInfo.endCursor,
+		hasNextPage: releases.pageInfo.hasNextPage,
+	};
+}
+
 export async function listCliEntries(
 	lastState: PostedState | null = null,
-	fetchPage: (page: number) => Promise<Release[]> = (page) =>
-		githubJson<Release[]>(`/repos/${OWNER}/${REPO}/releases?per_page=100&page=${page}`),
+	fetchPage: (after: string | null) => Promise<ReleasePage> = fetchReleasePage,
 ): Promise<ChangelogEntry[]> {
 	const releases: Release[] = [];
-	for (let page = 1; ; page += 1) {
-		const pageReleases = await fetchPage(page);
-		const publicReleases = pageReleases.filter((release) => !release.draft && !release.prerelease);
+	let after: string | null = null;
+	for (;;) {
+		const page = await fetchPage(after);
+		const publicReleases = page.releases.filter(
+			(release) => !release.isDraft && !release.isPrerelease,
+		);
 		releases.push(...publicReleases);
 		const reachedState = lastState
 			? publicReleases.some(
-					(release) =>
-						release.published_at !== null && release.published_at <= lastState.publishedAt,
+					(release) => release.publishedAt !== null && release.publishedAt <= lastState.publishedAt,
 				)
-			: false;
-		if (!lastState || reachedState || pageReleases.length < 100) break;
+			: publicReleases.length > 0;
+		if (reachedState || !page.hasNextPage) break;
+		after = page.endCursor;
 	}
 
 	if (releases.length === 0) throw new Error("No public GitHub releases found for Codex CLI");
 	return releases.map((release) => {
-		const publishedAt = release.published_at;
-		if (!publishedAt) throw new Error(`Release missing published_at: ${release.tag_name}`);
+		const publishedAt = release.publishedAt;
+		if (!publishedAt) throw new Error(`Release missing publishedAt: ${release.tagName}`);
 		const version = parseReleaseVersion(release);
 		return {
 			key: `rust-v${normalizeCliVersion(version)}`,
-			id: release.tag_name,
+			id: release.tagName,
 			topic: "codex-cli",
 			date: publishedAt.slice(0, 10),
 			publishedAt,
 			title: releaseTitle(release),
 			version,
-			url: release.html_url,
-			body: release.body?.trim() || "No release notes provided.",
+			url: release.url,
+			body: "",
 		} satisfies ChangelogEntry;
 	});
+}
+
+async function withReleaseBody(entry: ChangelogEntry): Promise<ChangelogEntry> {
+	if (entry.topic !== "codex-cli") return entry;
+	const release = await githubJson<{ body: string | null }>(
+		`/repos/${OWNER}/${REPO}/releases/tags/${encodeURIComponent(entry.id)}`,
+	);
+	return { ...entry, body: release.body?.trim() || "No release notes provided." };
 }
 
 async function listAppEntries(): Promise<ChangelogEntry[]> {
@@ -448,7 +505,7 @@ export async function generateLatestPost(): Promise<string> {
 	const entries = await listEntries();
 	const latestEntry = entries[0];
 	if (!latestEntry) throw new Error("No changelog entries found");
-	return generatePost(latestEntry);
+	return generatePost(await withReleaseBody(latestEntry));
 }
 
 function xClient(): Client {
@@ -462,7 +519,13 @@ function xClient(): Client {
 	return new Client({ oauth1 });
 }
 
-export async function listPendingEntries(): Promise<ChangelogEntry[]> {
+type PendingEntries = {
+	pending: ChangelogEntry[];
+	latestAppKey: string | undefined;
+	latestCliKey: string | undefined;
+};
+
+export async function listPendingEntries(): Promise<PendingEntries> {
 	const [appStateText, cliStateText] = await Promise.all([
 		readState(APP_STATE_FILE),
 		readState(CLI_STATE_FILE),
@@ -475,23 +538,24 @@ export async function listPendingEntries(): Promise<ChangelogEntry[]> {
 		...entriesSinceState(cliEntries, cliState),
 	].sort((left, right) => compareState(entryState(left), entryState(right)));
 
-	return pendingEntries;
+	return {
+		pending: pendingEntries,
+		latestAppKey: appEntries[0]?.key,
+		latestCliKey: cliEntries[0]?.key,
+	};
 }
 
 async function main(): Promise<void> {
-	const pendingEntries = await listPendingEntries();
+	const { pending: pendingEntries, latestAppKey, latestCliKey } = await listPendingEntries();
 
 	if (pendingEntries.length === 0) {
-		const [appEntries, cliEntries] = await Promise.all([listAppEntries(), listCliEntries()]);
-		console.log(
-			`No new changelog entry. latestApp=${appEntries[0]?.key} latestCli=${cliEntries[0]?.key}`,
-		);
+		console.log(`No new changelog entry. latestApp=${latestAppKey} latestCli=${latestCliKey}`);
 		return;
 	}
 
 	const client = xClient();
 	for (const [index, entry] of pendingEntries.entries()) {
-		const postText = await generatePost(entry);
+		const postText = await generatePost(await withReleaseBody(entry));
 		const response = await client.posts.create({ text: postText });
 		const id = response.data?.id;
 		if (!id) throw new Error(`X create post missing id for entry ${entry.key}`);

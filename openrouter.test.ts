@@ -7,14 +7,14 @@ const appHtml = `<ul><li id="codex-2026-05-17-app" data-codex-topics="codex-app"
 <div><time>2026-05-17</time><h3>Codex app update</h3></div>
 <article>Better controls.</article></li></ul>`;
 const release = {
-	tag_name: "rust-v0.131.0",
-	html_url: "https://github.com/openai/codex/releases/tag/rust-v0.131.0",
+	tagName: "rust-v0.131.0",
+	url: "https://github.com/openai/codex/releases/tag/rust-v0.131.0",
 	name: "0.131.0",
-	body: "Better controls, faster search, and bug fixes.",
-	draft: false,
-	prerelease: false,
-	published_at: "2026-05-18T17:39:34Z",
+	isDraft: false,
+	isPrerelease: false,
+	publishedAt: "2026-05-18T17:39:34Z",
 };
+const releaseBody = "Better controls, faster search, and bug fixes.";
 
 describe("OpenRouter post generation", () => {
 	const originalKey = Bun.env.OPENROUTER_API_KEY;
@@ -32,7 +32,21 @@ describe("OpenRouter post generation", () => {
 			const request = new Request(input, init);
 			const url = new URL(request.url);
 			if (url.hostname === "developers.openai.com") return new Response(appHtml);
-			if (url.hostname === "api.github.com") return Response.json([release]);
+			if (url.href === "https://api.github.com/graphql") {
+				return Response.json({
+					data: {
+						repository: {
+							releases: {
+								nodes: [release],
+								pageInfo: { endCursor: null, hasNextPage: false },
+							},
+						},
+					},
+				});
+			}
+			if (url.pathname === `/repos/openai/codex/releases/tags/${release.tagName}`) {
+				return Response.json({ body: releaseBody });
+			}
 			expect(request.url).toBe("https://openrouter.ai/api/v1/chat/completions");
 			requests.push(request);
 			const response = replies.shift();
@@ -51,12 +65,11 @@ describe("OpenRouter post generation", () => {
 
 	test("uses Opus 5 and preserves the post format", async () => {
 		const text = await generateLatestPost();
-		expect(text).toBe(
-			`🚀 Codex CLI 0.131.0 is out!\n\n${bullets}\n\nChangelog: ${release.html_url}`,
-		);
+		expect(text).toBe(`🚀 Codex CLI 0.131.0 is out!\n\n${bullets}\n\nChangelog: ${release.url}`);
 		expect(text.length).toBeLessThanOrEqual(280);
 		expect(requests).toHaveLength(1);
 		const request = requests[0]!;
+		expect(await request.clone().text()).toContain(releaseBody);
 		expect(request.method).toBe("POST");
 		expect(request.headers.get("Authorization")).toBe("Bearer test-key");
 		expect(await request.json()).toMatchObject({

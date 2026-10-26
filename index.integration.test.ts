@@ -5,7 +5,19 @@ import {
 	generateLatestPost,
 	listCliEntries,
 	type ChangelogEntry,
+	type Release,
 } from "./index";
+
+function release(version: string, publishedAt: string, isPrerelease = false): Release {
+	return {
+		tagName: `rust-v${version}`,
+		url: `https://github.com/openai/codex/releases/tag/rust-v${version}`,
+		name: version,
+		isDraft: false,
+		isPrerelease,
+		publishedAt,
+	};
+}
 
 const baseEntry = {
 	topic: "codex-cli",
@@ -65,53 +77,47 @@ test("state cursor returns newer releases oldest first", () => {
 	).toEqual(["rust-v0.131.0", "rust-v0.132.0"]);
 });
 
-test("CLI release pagination stops on the page containing the saved state", async () => {
+test("CLI release pagination follows cursors until the saved state, skipping prereleases", async () => {
 	const publishedAt = "2026-08-18T22:26:03Z";
-	const page = Array.from({ length: 100 }, (_, index) => {
-		const version = `0.${200 - index}.0`;
-		return {
-			tag_name: `rust-v${version}`,
-			html_url: `https://github.com/openai/codex/releases/tag/rust-v${version}`,
-			name: version,
-			body: "Release notes.",
-			draft: false,
-			prerelease: false,
-			published_at: index === 99 ? publishedAt : "2026-08-19T00:00:00Z",
-		};
+	const pages = new Map<string | null, ReturnType<typeof release>[]>([
+		[
+			null,
+			[
+				release("0.202.0-alpha.1", "2026-08-20T00:00:00Z", true),
+				release("0.201.0", "2026-08-19T12:00:00Z"),
+			],
+		],
+		["c1", [release("0.200.0", "2026-08-19T00:00:00Z"), release("0.199.0", publishedAt)]],
+	]);
+	const requested: (string | null)[] = [];
+
+	const entries = await listCliEntries({ key: "rust-v0.199.0", publishedAt }, async (after) => {
+		requested.push(after);
+		const releases = pages.get(after);
+		if (!releases) throw new Error(`unexpected cursor ${after}`);
+		return { releases, endCursor: after === null ? "c1" : "c2", hasNextPage: true };
 	});
-	const requestedPages: number[] = [];
 
-	const entries = await listCliEntries(
-		{ key: "rust-v0.101.0", publishedAt },
-		async (pageNumber) => {
-			requestedPages.push(pageNumber);
-			if (pageNumber !== 1) throw new Error(`unexpected page ${pageNumber}`);
-			return page;
-		},
-	);
-
-	expect(requestedPages).toEqual([1]);
-	expect(entries).toHaveLength(100);
+	expect(requested).toEqual([null, "c1"]);
+	expect(entries.map((entry) => entry.key)).toEqual([
+		"rust-v0.201.0",
+		"rust-v0.200.0",
+		"rust-v0.199.0",
+	]);
 });
 
-test("CLI release pagination reads only the newest page without saved state", async () => {
-	const requestedPages: number[] = [];
-	const releases = await listCliEntries(null, async (pageNumber) => {
-		requestedPages.push(pageNumber);
-		return [
-			{
-				tag_name: "rust-v0.200.0",
-				html_url: "https://github.com/openai/codex/releases/tag/rust-v0.200.0",
-				name: "0.200.0",
-				body: "Release notes.",
-				draft: false,
-				prerelease: false,
-				published_at: "2026-08-19T00:00:00Z",
-			},
-		];
+test("CLI release pagination stops at the first stable release without saved state", async () => {
+	const requested: (string | null)[] = [];
+	const releases = await listCliEntries(null, async (after) => {
+		requested.push(after);
+		return {
+			releases: [release("0.200.0", "2026-08-19T00:00:00Z")],
+			endCursor: "c1",
+			hasNextPage: true,
+		};
 	});
 
-	expect(requestedPages).toEqual([1]);
+	expect(requested).toEqual([null]);
 	expect(releases.map((release) => release.key)).toEqual(["rust-v0.200.0"]);
 });
 
