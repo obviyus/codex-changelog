@@ -264,11 +264,14 @@ async function listAppEntries(): Promise<ChangelogEntry[]> {
 	const response = new HTMLRewriter()
 		.on("li[data-codex-topics]", {
 			element(element) {
-				const topic = element.getAttribute("data-codex-topics");
-				if (topic !== APP_TOPIC) return;
+				// Topics are comma-separated, e.g. "general,codex-app,codex-mobile".
+				const topics = (element.getAttribute("data-codex-topics") ?? "")
+					.split(",")
+					.map((topic) => topic.trim());
+				if (!topics.includes(APP_TOPIC)) return;
 				const id = element.getAttribute("id");
 				if (!id) throw new Error("Changelog entry missing id");
-				element.before(`\nENTRY_START\t${id}\t${topic}\n`, { html: false });
+				element.before(`\nENTRY_START\t${id}\t${APP_TOPIC}\n`, { html: false });
 				element.after("\nENTRY_END\n", { html: false });
 			},
 		})

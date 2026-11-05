@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { generateLatestPost } from "./index";
 
 const bullets = "✨ Better controls\n🔎 Faster search\n🛠️ Bug fixes";
-const appHtml = `<ul><li id="codex-2026-05-17-app" data-codex-topics="codex-app">
+const defaultAppHtml = `<ul><li id="codex-2026-05-17-app" data-codex-topics="codex-app">
 <div><time>2026-05-17</time><h3>Codex app update</h3></div>
 <article>Better controls.</article></li></ul>`;
 const release = {
@@ -19,6 +19,7 @@ const releaseBody = "Better controls, faster search, and bug fixes.";
 describe("OpenRouter post generation", () => {
 	const originalKey = Bun.env.OPENROUTER_API_KEY;
 	const originalModel = Bun.env.OPENROUTER_MODEL;
+	let appHtml: string;
 	let requests: Request[];
 	let replies: Response[];
 	let fetchSpy: ReturnType<typeof spyOn<typeof globalThis, "fetch">>;
@@ -26,6 +27,7 @@ describe("OpenRouter post generation", () => {
 	beforeEach(() => {
 		Bun.env.OPENROUTER_API_KEY = "test-key";
 		delete Bun.env.OPENROUTER_MODEL;
+		appHtml = defaultAppHtml;
 		requests = [];
 		replies = [Response.json({ choices: [{ message: { content: bullets } }] })];
 		fetchSpy = spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
@@ -77,6 +79,19 @@ describe("OpenRouter post generation", () => {
 			reasoning: { enabled: false },
 			max_tokens: 512,
 		});
+	});
+
+	test("includes multi-topic app entries and ignores non-app topics", async () => {
+		appHtml = `<ul><li id="codex-2026-06-02-mobile" data-codex-topics="codex-mobile">
+<div><time>2026-06-02</time><h3>Codex mobile update</h3></div>
+<article>Mobile only.</article></li>
+<li id="codex-2026-06-01-app" data-codex-topics="general,codex-app">
+<div><time>2026-06-01</time><h3>Codex app update</h3></div>
+<article>Multi-topic app notes.</article></li></ul>`;
+		const text = await generateLatestPost();
+		expect(text).toStartWith("🚀 Codex app update\n");
+		expect(text).toEndWith("#codex-2026-06-01-app");
+		expect(await requests[0]!.text()).toContain("Multi-topic app notes.");
 	});
 
 	test("retries an oversized post with a shorter prompt", async () => {
