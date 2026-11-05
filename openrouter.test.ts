@@ -30,8 +30,9 @@ describe("OpenRouter post generation", () => {
 		appHtml = defaultAppHtml;
 		requests = [];
 		replies = [Response.json({ choices: [{ message: { content: bullets } }] })];
-		fetchSpy = spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
-			const request = new Request(input, init);
+		const mockFetch = async (input: string | URL | Request, init?: RequestInit) => {
+			const request =
+				input instanceof Request ? new Request(input, init) : new Request(input.toString(), init);
 			const url = new URL(request.url);
 			if (url.hostname === "developers.openai.com") return new Response(appHtml);
 			if (url.href === "https://api.github.com/graphql") {
@@ -54,7 +55,11 @@ describe("OpenRouter post generation", () => {
 			const response = replies.shift();
 			if (!response) throw new Error("Unexpected extra generation request");
 			return response;
-		});
+		};
+		// `typeof fetch` also carries Bun's static `preconnect`; keep the real one.
+		fetchSpy = spyOn(globalThis, "fetch").mockImplementation(
+			Object.assign(mockFetch, { preconnect: fetch.preconnect }),
+		);
 	});
 
 	afterEach(() => {
