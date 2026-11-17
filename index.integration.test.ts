@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import {
-	entriesSinceState,
+	entryToPost,
 	finalizePost,
 	generateLatestPost,
 	listCliEntries,
@@ -40,14 +40,14 @@ test("state cursor survives removed changelog ids", () => {
 	];
 
 	expect(
-		entriesSinceState(entries, {
+		entryToPost(entries, {
 			key: "codex-2026-05-13-app",
 			publishedAt: "2026-05-14T00:00:00Z",
 		}),
-	).toEqual([]);
+	).toBeNull();
 });
 
-test("state cursor returns newer releases oldest first", () => {
+test("state cursor posts only the newest pending entry, never a backlog", () => {
 	const entries: ChangelogEntry[] = [
 		{
 			...baseEntry,
@@ -70,11 +70,15 @@ test("state cursor returns newer releases oldest first", () => {
 	];
 
 	expect(
-		entriesSinceState(entries, {
+		entryToPost(entries, {
 			key: "rust-v0.130.0",
 			publishedAt: "2026-05-08T23:09:55Z",
-		}).map((entry) => entry.key),
-	).toEqual(["rust-v0.131.0", "rust-v0.132.0"]);
+		})?.key,
+	).toBe("rust-v0.132.0");
+	expect(entryToPost(entries, null)?.key).toBe("rust-v0.132.0");
+	expect(
+		entryToPost(entries, { key: "rust-v0.132.0", publishedAt: "2026-05-19T01:00:00Z" }),
+	).toBeNull();
 });
 
 test("CLI release pagination follows cursors until the saved state, skipping prereleases", async () => {

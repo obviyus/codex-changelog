@@ -42,6 +42,8 @@ jobs:
 
       - name: Check state change
         id: state_check
+        # Always persist state, even if a later post failed, so posted entries are never re-posted.
+        if: always()
         run: |
           set -euo pipefail
           if [ -z "$(git status --porcelain -- .state/last_posted_app_key.txt .state/last_posted_cli_key.txt)" ]; then
@@ -51,7 +53,7 @@ jobs:
           fi
 
       - name: Commit state
-        if: steps.state_check.outputs.changed == 'true'
+        if: always() && steps.state_check.outputs.changed == 'true'
         run: |
           set -euo pipefail
           git config user.name "github-actions[bot]"

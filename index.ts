@@ -344,20 +344,19 @@ function entryState(entry: ChangelogEntry): PostedState {
 	return { key: entry.key, publishedAt: entry.publishedAt };
 }
 
-export function entriesSinceState(
+// At most one post per topic per run: the newest entry past the saved cursor.
+// Older pending entries are skipped, never backfilled, so a stale cursor or a
+// parser change that surfaces old entries cannot burst-post a backlog.
+export function entryToPost(
 	entries: ChangelogEntry[],
 	lastState: PostedState | null,
-): ChangelogEntry[] {
-	if (!lastState) {
-		const latest = entries.toSorted((left, right) =>
-			compareState(entryState(right), entryState(left)),
-		)[0];
-		return latest ? [latest] : [];
-	}
-
-	return entries
-		.filter((entry) => compareState(entryState(entry), lastState) > 0)
-		.sort((left, right) => compareState(entryState(left), entryState(right)));
+): ChangelogEntry | null {
+	const latest = entries.toSorted((left, right) =>
+		compareState(entryState(right), entryState(left)),
+	)[0];
+	if (!latest) return null;
+	if (lastState && compareState(entryState(latest), lastState) <= 0) return null;
+	return latest;
 }
 
 function requiredEnv(name: string): string {
@@ -536,10 +535,9 @@ export async function listPendingEntries(): Promise<PendingEntries> {
 	const appState = parseState(APP_STATE_FILE, appStateText);
 	const cliState = parseState(CLI_STATE_FILE, cliStateText);
 	const [appEntries, cliEntries] = await Promise.all([listAppEntries(), listCliEntries(cliState)]);
-	const pendingEntries = [
-		...entriesSinceState(appEntries, appState),
-		...entriesSinceState(cliEntries, cliState),
-	].sort((left, right) => compareState(entryState(left), entryState(right)));
+	const pendingEntries = [entryToPost(appEntries, appState), entryToPost(cliEntries, cliState)]
+		.filter((entry): entry is ChangelogEntry => entry !== null)
+		.sort((left, right) => compareState(entryState(left), entryState(right)));
 
 	return {
 		pending: pendingEntries,
